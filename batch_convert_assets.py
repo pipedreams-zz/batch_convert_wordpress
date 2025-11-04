@@ -13,6 +13,10 @@ except ImportError:
     print("Fehler: Pillow ist nicht installiert. Bitte mit `pip install Pillow` nachinstallieren.")
     sys.exit(1)
 
+# Erhöhe das Decompression-Bomb-Limit für große Bilder (z.B. hochauflösende Scans)
+# Standard: ~89 MP, Neu: ~300 MP (ausreichend für die meisten legitimen Fotos)
+Image.MAX_IMAGE_PIXELS = 300_000_000
+
 # Optional: AVIF-Support nachladen (falls installiert)
 try:
     import pillow_avif  # noqa: F401
@@ -56,6 +60,35 @@ def wp_slugify(name: str) -> str:
     base = base.strip("-")
     # Fallback
     return base or "datei"
+
+def normalize_prefix(prefix: str) -> str:
+    """
+    Normalisiert den Prefix: Kleinbuchstaben, nur alphanumerische Zeichen.
+    Fügt automatisch einen Bindestrich am Ende hinzu, falls nicht vorhanden.
+    """
+    if not prefix:
+        return ""
+    # Kleinbuchstaben und nur alphanumerische Zeichen behalten
+    normalized = re.sub(r"[^a-z0-9]+", "", prefix.lower())
+    # Bindestrich am Ende hinzufügen
+    if normalized and not normalized.endswith("-"):
+        normalized += "-"
+    return normalized
+
+def ensure_prefix(slug: str, prefix: str) -> str:
+    """
+    Prüft, ob der Slug bereits mit dem Prefix beginnt.
+    Falls nicht, wird der Prefix vorangestellt.
+    """
+    if not prefix:
+        return slug
+    # Prefix ohne Bindestrich für Vergleich
+    prefix_base = prefix.rstrip("-")
+    # Prüfen ob Slug bereits mit Prefix beginnt (mit oder ohne Bindestrich)
+    if slug.startswith(prefix) or slug.startswith(prefix_base):
+        return slug
+    # Prefix hinzufügen
+    return f"{prefix}{slug}"
 
 
 # ------------------------------
@@ -180,6 +213,7 @@ def convert_image_file(
     target_width: int,
     quality: int,
     taken: Dict[str, int],
+    prefix: str = "",
 ):
     im = load_image_fix_orientation(src_path)
     w, h = compute_new_size(im, target_width)
@@ -187,6 +221,7 @@ def convert_image_file(
         im = im.resize((w, h), Image.LANCZOS)
 
     base_slug = wp_slugify(src_path.stem)
+    base_slug = ensure_prefix(base_slug, prefix)
     ext = "." + out_fmt.lower().replace("jpeg", "jpg")
     out_path = unique_target_path(out_dir, base_slug, ext, taken)
     save_image(im, out_path, out_fmt, quality)
@@ -200,6 +235,7 @@ def convert_pdf_file(
     quality: int,
     taken: Dict[str, int],
     pdf_zoom: float = 2.0,  # ~ 144 DPI (72 * 2)
+    prefix: str = "",
 ):
     if not PYMUPDF_AVAILABLE:
         raise RuntimeError(
@@ -207,6 +243,7 @@ def convert_pdf_file(
         )
     doc = fitz.open(src_path)
     base_slug = wp_slugify(src_path.stem)
+    base_slug = ensure_prefix(base_slug, prefix)
     ext = "." + out_fmt.lower().replace("jpeg", "jpg")
 
     for i, page in enumerate(doc, start=1):
@@ -241,6 +278,7 @@ def walk_and_convert(
     target_width: int,
     quality: int,
     pdf_zoom: float,
+    prefix: str = "",
 ):
     ensure_output_dir(out_dir)
 
@@ -257,11 +295,11 @@ def walk_and_convert(
         try:
             if ext in SUPPORTED_PDF_EXTS:
                 convert_pdf_file(
-                    src, out_dir, out_fmt, target_width, quality, taken, pdf_zoom=pdf_zoom
+                    src, out_dir, out_fmt, target_width, quality, taken, pdf_zoom=pdf_zoom, prefix=prefix
                 )
             elif ext in SUPPORTED_IMAGE_EXTS:
                 convert_image_file(
-                    src, out_dir, out_fmt, target_width, quality, taken
+                    src, out_dir, out_fmt, target_width, quality, taken, prefix=prefix
                 )
             else:
                 print(f"Übersprungen (nicht unterstützt): {src}")
@@ -277,7 +315,19 @@ def main():
         print(f"Fehler: Quellordner '{in_dir}' existiert nicht.")
         sys.exit(2)
 
-    out_dir = Path(ask("Zielordner eingeben", "./output")).expanduser().resolve()
+    # Standard-Ausgabeverzeichnis ist ein Unterordner des Quellordners
+    default_out_dir = in_dir / "output-web"
+    out_dir_input = ask("Zielordner eingeben", str(default_out_dir))
+    out_dir = Path(out_dir_input).expanduser().resolve()
+
+    # Prefix abfragen (optional)
+    prefix_input = ask("Dateinamen-Prefix (z.B. ABC123, optional - Enter für keinen)", "")
+    prefix = normalize_prefix(prefix_input)
+    if prefix_input and prefix:
+        print(f"  → Normalisierter Prefix: '{prefix}'")
+    elif prefix_input and not prefix:
+        print("  → Warnung: Prefix enthält keine gültigen Zeichen und wird ignoriert.")
+
     include = ask("Dateimuster (Komma-getrennt), z.B. tif,jpg,png,pdf", "tif,jpg,jpeg,png,pdf")
     include_exts = parse_ext_list(include)
 
@@ -324,6 +374,7 @@ def main():
         target_width=target_width,
         quality=quality,
         pdf_zoom=pdf_zoom,
+        prefix=prefix,
     )
     print("\nFertig.")
 
